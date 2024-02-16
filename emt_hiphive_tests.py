@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+from io import StringIO
 from typing import List, Optional, Tuple
 
 from ase import Atoms
@@ -9,13 +11,25 @@ from ase.units import fs
 
 from asap3 import EMT
 from calorine.tools import get_force_constants, relax_structure
+from hiphive import ClusterSpace, StructureContainer, ForceConstantPotential
+from hiphive.utilities import prepare_structures
+import numpy as np
+from tqdm import tqdm
+from trainstation import Optimizer
+
 from phonopy import Phonopy
+
 # from phonopy.structure.atoms import PhonopyAtoms
 
 
 TEMPERATURE_SERIES = [10, 300, 1000]
 PHONON_SUPERCELL = [[-4, 4, 4], [4, -4, 4], [4, 4, -4]]
 UNITCELL_SUPERCELL = [4, 4, 4]
+
+# Hiphive cluster model: 2nd-order only, 6Å
+CLUSTER_CUTOFFS = [
+    6.0,
+]
 
 
 def get_opt_structures() -> Tuple[Atoms, Atoms]:
@@ -25,9 +39,7 @@ def get_opt_structures() -> Tuple[Atoms, Atoms]:
     relax_structure(prim, fmax=1e-6)
     prim.write("prim.extxyz")
 
-    unitcell = ase.build.make_supercell(
-        prim, [[-1, 1, 1], [1, -1, 1], [1, 1, -1]]
-    )
+    unitcell = ase.build.make_supercell(prim, [[-1, 1, 1], [1, -1, 1], [1, 1, -1]])
     unitcell.write("unitcell.extxyz")
 
     return prim, unitcell
@@ -72,7 +84,10 @@ def run_md(
         traj_writer = Trajectory(trajectory, "w", atoms)
         dyn.attach(traj_writer.write, interval=traj_interval)
 
-    dyn.run(steps)
+    for _ in tqdm(dyn.irun(steps), total=steps):
+        pass
+
+    # dyn.run(steps)
 
     if trajectory:
         return ase.io.read(trajectory, index=":")
@@ -80,8 +95,58 @@ def run_md(
         return [atoms]
 
 
+class PrintCapture:
+    def __init__(self, callback, callback_interval=2):
+        self._io = StringIO()
+        self._callback = callback
+        self._callback_interval = callback_interval
+        self._lines_caught = 0
+
+    def write(self, *args):
+        self._io.write(*args)
+        self._lines_caught += 1
+        if self._lines_caught == self._callback_interval:
+            self._lines_caught = 0
+            self._callback()
+
+    def get_last_line(self):
+        return self._io.getvalue().split('\n')[-2]
+        
+
+
+def run_sc(
+        atoms: Atoms,
+        cs: ClusterSpace,
+        temperature: float = 300,
+        n_structures: int = 50,
+        n_iterations: int = 50,
+        alpha = 0.2) -> None:
+
+    from hiphive.self_consistent_phonons import self_consistent_harmonic_model
+    progress = tqdm(total=n_iterations)
+    callback = progress.update
+
+    with redirect_stdout(PrintCapture(callback)) as scp_output:
+        parameters_traj = self_consistent_harmonic_model(
+            atoms, EMT(), cs, temperature, alpha, n_iterations, n_structures
+        )
+        last_line = scp_output.get_last_line()
+
+    progress.close()
+
+    print('    ' + last_line)
+    print('    writing force constant potential...')
+
+    fcp = ForceConstantPotential(cs, parameters_traj[-1])
+    fcp.write(f"scp_{temperature}K.fcp")
+
+
 def main() -> None:
+    print("Optimising structure...")
     prim, unitcell = get_opt_structures()
+    supercell = unitcell.copy() * UNITCELL_SUPERCELL
+
+    print("Calculating harmonic phonons by direct method...")
     phonon = get_direct_phonons(prim)
 
     plt = phonon.auto_band_structure(
@@ -95,19 +160,48 @@ def main() -> None:
     # followed by phonon.get_band_structure_dict(), with qpoints from
     # phonopy.phonon.band_structure.get_band_qpoints_by_seekpath
 
+    print(f"Setting up cluster space (cutoffs: {CLUSTER_CUTOFFS})...")
+    cs = ClusterSpace(supercell, CLUSTER_CUTOFFS)
+
     for temperature in TEMPERATURE_SERIES:
-        print(f"Molecular dynamics at {temperature}K: ")
-        atoms = unitcell.copy() * UNITCELL_SUPERCELL
+        print(f"\n\nMolecular dynamics at {temperature}K: ")
+        atoms = supercell.copy()
         atoms.calc = EMT()
 
         print("Equilibrating...")
-        atoms = run_md(atoms, temperature=temperature, log_file=f"md_eq_{temperature}K.log")[-1]
+        atoms = run_md(
+            atoms, temperature=temperature, log_file=f"md_eq_{temperature}K.log"
+        )[-1]
 
         print("Production run...")
-        atoms = run_md(
-            atoms, temperature=temperature, trajectory=f"md_{temperature}K.traj", log_file=f"md_{temperature}K.log"
+        training_structures = run_md(
+            atoms,
+            temperature=temperature,
+            trajectory=f"md_{temperature}K.traj",
+            log_file=f"md_{temperature}K.log",
         )
 
+        print("Getting displacement statistics...")
+        training_structures = prepare_structures(training_structures, supercell)
+
+        abs_displacements = np.abs([s.arrays['displacements'] for s in training_structures])
+        print(f"    avg: {np.mean(abs_displacements):6.4f}, max: {np.max(abs_displacements)}")
+
+        print("Fitting effective harmonic model...")        
+        sc = StructureContainer(cs)
+        for s in training_structures:
+            sc.add_structure(s)
+        opt = Optimizer(sc.get_fit_data(), train_size=0.9)
+        opt.train()
+        stats = opt.summary
+        print(f"    RMSE (training): {stats['rmse_train']:6.3e}")
+        print(f"    RMSE (test):     {stats['rmse_test']:6.3e}")
+        fcp = ForceConstantPotential(cs, opt.parameters)
+        fcp.write(f"ehm_{temperature}K.fcp")
+
+        print("Running self-consistent-phonons...")
+        run_sc(supercell.copy(), cs, temperature=temperature)
+              
 
 if __name__ == "__main__":
     main()

@@ -10,6 +10,6 @@ RUN apt-get update && apt-get install -y \
 # Enable conda environment before using pip for remaining packages
 USER mambauser
 ARG MAMBA_DOCKERFILE_ACTIVATE=1
-RUN pip install calorine
+RUN pip install calorine tqdm
 
 COPY --chown=$MAMBA_USER:$MAMBA_USER emt_hiphive_tests.py /tmp/emt_hiphive_tests.py
