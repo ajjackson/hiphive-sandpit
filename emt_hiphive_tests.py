@@ -39,7 +39,9 @@ def get_opt_structures() -> Tuple[Atoms, Atoms]:
     relax_structure(prim, fmax=1e-6)
     prim.write("prim.extxyz")
 
-    unitcell = ase.build.make_supercell(prim, [[-1, 1, 1], [1, -1, 1], [1, 1, -1]])
+    unitcell = ase.build.make_supercell(
+        prim, [[-1, 1, 1], [1, -1, 1], [1, 1, -1]]
+    )
     unitcell.write("unitcell.extxyz")
 
     return prim, unitcell
@@ -110,19 +112,20 @@ class PrintCapture:
             self._callback()
 
     def get_last_line(self):
-        return self._io.getvalue().split('\n')[-2]
-        
+        return self._io.getvalue().split("\n")[-2]
 
 
 def run_sc(
-        atoms: Atoms,
-        cs: ClusterSpace,
-        temperature: float = 300,
-        n_structures: int = 50,
-        n_iterations: int = 50,
-        alpha = 0.2) -> None:
+    atoms: Atoms,
+    cs: ClusterSpace,
+    temperature: float = 300,
+    n_structures: int = 50,
+    n_iterations: int = 50,
+    alpha=0.2,
+) -> ForceConstantPotential:
 
     from hiphive.self_consistent_phonons import self_consistent_harmonic_model
+
     progress = tqdm(total=n_iterations)
     callback = progress.update
 
@@ -134,11 +137,13 @@ def run_sc(
 
     progress.close()
 
-    print('    ' + last_line)
-    print('    writing force constant potential...')
+    print("    " + last_line)
+    print("    writing force constant potential...")
 
     fcp = ForceConstantPotential(cs, parameters_traj[-1])
     fcp.write(f"scp_{temperature}K.fcp")
+
+    return fcp
 
 
 def main() -> None:
@@ -170,7 +175,9 @@ def main() -> None:
 
         print("Equilibrating...")
         atoms = run_md(
-            atoms, temperature=temperature, log_file=f"md_eq_{temperature}K.log"
+            atoms,
+            temperature=temperature,
+            log_file=f"md_eq_{temperature}K.log",
         )[-1]
 
         print("Production run...")
@@ -182,12 +189,19 @@ def main() -> None:
         )
 
         print("Getting displacement statistics...")
-        training_structures = prepare_structures(training_structures, supercell)
+        training_structures = prepare_structures(
+            training_structures, supercell
+        )
 
-        abs_displacements = np.abs([s.arrays['displacements'] for s in training_structures])
-        print(f"    avg: {np.mean(abs_displacements):6.4f}, max: {np.max(abs_displacements)}")
+        abs_displacements = np.abs(
+            [s.arrays["displacements"] for s in training_structures]
+        )
+        print(
+            f"    avg: {np.mean(abs_displacements):6.4f}, "
+            f"max: {np.max(abs_displacements)}"
+        )
 
-        print("Fitting effective harmonic model...")        
+        print("Fitting effective harmonic model...")
         sc = StructureContainer(cs)
         for s in training_structures:
             sc.add_structure(s)
@@ -201,7 +215,7 @@ def main() -> None:
 
         print("Running self-consistent-phonons...")
         run_sc(supercell.copy(), cs, temperature=temperature)
-              
+
 
 if __name__ == "__main__":
     main()
