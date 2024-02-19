@@ -17,8 +17,8 @@ It seems that despite similar statistics in the displacement distances, MD is sa
 
 ### Aluminium 300K comparison
 
-![](compare_Al_bands_300.png)
+![](plots/compare_Al_bands_300.png)
 
 ### Gold 300K comparison
 
-![](compare_Au_bands_300.png)
+![](plots/compare_Au_bands_300.png)
